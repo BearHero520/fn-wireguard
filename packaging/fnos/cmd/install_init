@@ -1,0 +1,10 @@
+#!/bin/bash
+set -eu
+fail() { printf '%s\n' "$1" > "${TRIM_TEMP_LOGFILE}"; exit 1; }
+command -v ip >/dev/null 2>&1 || fail '系统缺少 ip 命令，请先在 NAS 上安装 iproute2。'
+command -v setpriv >/dev/null 2>&1 || fail '系统缺少 setpriv（util-linux），无法以最小权限启动应用。'
+command -v flock >/dev/null 2>&1 || fail '系统缺少 flock（util-linux），无法串行执行生命周期操作。'
+if [ "$(id -u)" != 0 ]; then
+  fail 'WireGuard 管理需要系统网络管理权限。'
+fi
+exit 0

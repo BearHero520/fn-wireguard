@@ -1,0 +1,13 @@
+#!/bin/bash
+set -eu
+umask 077
+# Root-only metadata maintenance. Never reads or rewrites secret contents.
+DATA_DIR="$(readlink -f -- "${TRIM_PKGVAR}")"
+[ -n "$DATA_DIR" ] && [ -d "$DATA_DIR" ] || {
+  printf 'maintenance: 应用数据目录不存在或无法规范化。\n' >&2
+  exit 1
+}
+exec "${TRIM_APPDEST}/server/fn-wireguard-maintenance" \
+  --data-dir "$DATA_DIR" \
+  --service-binary "${TRIM_APPDEST}/server/fn-wireguard" \
+  --user "${TRIM_USERNAME}" --group "${TRIM_GROUPNAME}"

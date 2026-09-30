@@ -1,0 +1,11 @@
+[
+  {
+    "stepTitle": "安装 WireGuard 管理",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "应用管理 NAS 的 WireGuard 网络接口，需要系统网络管理权限。请从飞牛管理员账号通过 HTTP 或 HTTPS 入口打开应用，无需另设管理密码。HTTP 请用于可信网络，建议启用 HTTPS 保护管理会话和配置传输。安装不会自动启用 VPN 或修改默认网关。应用启动时会开启 IPv4 转发；VPN 启用后仅为授权客户端添加访问与 NAT 规则，停止 VPN 时清理。停止应用不会关闭系统共享的 IPv4 转发。"
+      }
+    ]
+  }
+]

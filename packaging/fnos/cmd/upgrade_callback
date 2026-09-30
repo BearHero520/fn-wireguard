@@ -1,0 +1,47 @@
+#!/bin/bash
+set -eu
+umask 077
+PACKAGE_DIR="$(readlink -f "${TRIM_APPDEST}")"
+fail() { printf '%s\n' "$1" > "${TRIM_TEMP_LOGFILE}"; exit 1; }
+lock_fail() { printf '%s\n' "$1" > "${TRIM_TEMP_LOGFILE}"; exit 1; }
+acquire_lifecycle_lock() {
+  [ "$(id -u)" = 0 ] || lock_fail '生命周期维护需要 root 权限。'
+  command -v flock >/dev/null 2>&1 || lock_fail '系统缺少 flock，无法串行执行应用生命周期操作。'
+  mkdir -p "${TRIM_PKGETC}"
+  chown root:root "${TRIM_PKGETC}"
+  chmod 700 "${TRIM_PKGETC}"
+  LOCK_FILE="${TRIM_PKGETC}/lifecycle.lock"
+  if [ -e "$LOCK_FILE" ] || [ -L "$LOCK_FILE" ]; then
+    [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ] || lock_fail '生命周期锁必须为普通文件，不能为符号链接。'
+    [ "$(stat -c '%h:%u' "$LOCK_FILE")" = '1:0' ] || lock_fail '生命周期锁必须归 root 所有且只有一个硬链接。'
+  fi
+  exec 9> "$LOCK_FILE"
+  chmod 600 "$LOCK_FILE"
+  flock -n 9 || lock_fail '另一项应用启动、停止或升级操作正在进行，请稍后重试。'
+}
+acquire_lifecycle_lock
+id "${TRIM_USERNAME}" >/dev/null 2>&1 || fail '应用专用用户不存在。'
+[ -d "$PACKAGE_DIR" ] || fail '应用安装目录不存在。'
+[ ! -L "$PACKAGE_DIR/server" ] || fail '应用服务目录不得为符号链接。'
+for file in "$PACKAGE_DIR/server/fn-wireguard" "$PACKAGE_DIR/server/fn-wireguard-maintenance" "$PACKAGE_DIR/server/run-service" "$PACKAGE_DIR/server/prepare-data"; do
+  [ -f "$file" ] && [ ! -L "$file" ] || fail '应用程序文件缺失或为不安全链接。'
+  chown root:root "$file"
+  chmod 755 "$file"
+done
+chown root:root "$PACKAGE_DIR" "$PACKAGE_DIR/server"
+chmod 755 "$PACKAGE_DIR" "$PACKAGE_DIR/server"
+[ -d "$PACKAGE_DIR/public" ] && [ ! -L "$PACKAGE_DIR/public" ] || fail '前端资源目录不存在或为不安全链接。'
+[ -z "$(find "$PACKAGE_DIR/public" -type l -print -quit)" ] || fail '前端资源不允许符号链接。'
+find "$PACKAGE_DIR/public" -exec chown root:root -- {} +
+find "$PACKAGE_DIR/public" -type d -exec chmod 755 -- {} +
+find "$PACKAGE_DIR/public" -type f -exec chmod 644 -- {} +
+mkdir -p "${TRIM_PKGVAR}" "${TRIM_PKGETC}"
+chmod 700 "${TRIM_PKGETC}"
+chown root:root "${TRIM_PKGETC}"
+[ ! -L "${TRIM_PKGETC}/maintenance.log" ] || fail '数据维护日志不得为符号链接。'
+/bin/bash "$PACKAGE_DIR/server/prepare-data" 2> "${TRIM_PKGETC}/maintenance.log" || {
+  printf '应用数据权限迁移失败：\n' > "${TRIM_TEMP_LOGFILE}"
+  cat "${TRIM_PKGETC}/maintenance.log" >> "${TRIM_TEMP_LOGFILE}"
+  exit 1
+}
+exit 0

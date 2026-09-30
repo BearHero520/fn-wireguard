@@ -1,0 +1,9 @@
+#!/bin/bash
+set -eu
+umask 077
+# This wrapper runs after setpriv. It never opens an app-user log as root.
+exec "${TRIM_APPDEST}/server/fn-wireguard" \
+  --data-dir "${TRIM_PKGVAR}" --web-dir "${TRIM_APPDEST}/public" \
+  --mode production --auth-mode fnos \
+  --unix-socket "${TRIM_PKGVAR}/app.sock" --base-path /app/fn-wireguard \
+  >> "${TRIM_PKGVAR}/app.log" 2>&1

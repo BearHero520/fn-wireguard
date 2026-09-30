@@ -1,0 +1,26 @@
+.tools/
+.local/
+data/
+dist/
+node_modules/
+web/dist/
+*.log
+*.db
+*.db-shm
+*.db-wal
+*.key
+*.pem
+# Exported WireGuard profiles contain private keys.
+*.conf
+*.fpk
+*.exe
+build/
+.DS_Store
+__pycache__/
+*.pyc
+# Local design reviews and NAS diagnostics are not distributable source.
+design/
+design-qa.md
+.env
+.env.*
+*.tsbuildinfo

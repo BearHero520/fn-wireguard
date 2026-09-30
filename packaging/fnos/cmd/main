@@ -1,0 +1,121 @@
+#!/bin/bash
+set -eu
+umask 077
+PID_FILE="${TRIM_PKGETC}/app.pid"
+APP_BIN="${TRIM_APPDEST}/server/fn-wireguard"
+APP_BIN_REAL="$(readlink -f "$APP_BIN" 2>/dev/null || printf '%s' "$APP_BIN")"
+SOCKET_FILE="${TRIM_PKGVAR}/app.sock"
+GATEWAY_SOCKET="${TRIM_APPDEST}/app.sock"
+
+running() {
+  [ -f "$PID_FILE" ] || return 1
+  PID="$(cat "$PID_FILE")"
+  case "$PID" in ''|*[!0-9]*) return 1 ;; esac
+  [ -L "/proc/$PID/exe" ] || return 1
+  PROCESS_EXE="$(readlink "/proc/$PID/exe" 2>/dev/null)" || return 1
+  [ "${PROCESS_EXE% (deleted)}" = "$APP_BIN_REAL" ] || return 1
+  kill -0 "$PID" 2>/dev/null
+}
+
+fail() { printf '%s\n' "$1" > "${TRIM_TEMP_LOGFILE}"; exit 1; }
+lock_fail() { printf '%s\n' "$1" > "${TRIM_TEMP_LOGFILE}"; exit 1; }
+acquire_lifecycle_lock() {
+  [ "$(id -u)" = 0 ] || lock_fail '生命周期维护需要 root 权限。'
+  command -v flock >/dev/null 2>&1 || lock_fail '系统缺少 flock，无法串行执行应用生命周期操作。'
+  mkdir -p "${TRIM_PKGETC}"
+  chown root:root "${TRIM_PKGETC}"
+  chmod 700 "${TRIM_PKGETC}"
+  LOCK_FILE="${TRIM_PKGETC}/lifecycle.lock"
+  if [ -e "$LOCK_FILE" ] || [ -L "$LOCK_FILE" ]; then
+    [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ] || lock_fail '生命周期锁必须为普通文件，不能为符号链接。'
+    [ "$(stat -c '%h:%u' "$LOCK_FILE")" = '1:0' ] || lock_fail '生命周期锁必须归 root 所有且只有一个硬链接。'
+  fi
+  exec 9> "$LOCK_FILE"
+  chmod 600 "$LOCK_FILE"
+  flock -n 9 || lock_fail '另一项应用启动、停止或升级操作正在进行，请稍后重试。'
+}
+if [ "${1:-}" = start ] || [ "${1:-}" = stop ]; then
+  acquire_lifecycle_lock
+fi
+start_failed() {
+  if [ -n "${LAUNCH_PID:-}" ] && [ -r "/proc/$LAUNCH_PID/status" ]; then
+    if [ "$(awk '/^PPid:/{print $2}' "/proc/$LAUNCH_PID/status")" = "$$" ]; then
+      kill -TERM "$LAUNCH_PID" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$PID_FILE"
+  fail "$1"
+}
+
+case "${1:-}" in
+  start)
+    running && exit 0
+    command -v ip >/dev/null 2>&1 || fail '系统缺少 ip 命令。'
+    command -v setpriv >/dev/null 2>&1 || fail '系统缺少 setpriv，无法以最小权限启动应用。'
+    [ -x "$APP_BIN" ] || fail '应用服务文件缺失或不可执行，请重新安装。'
+    [ ! -L "${TRIM_PKGETC}/app.pid" ] || fail 'PID 文件不得为符号链接。'
+    mkdir -p "${TRIM_PKGVAR}" "${TRIM_PKGETC}"
+    chmod 700 "${TRIM_PKGETC}"
+    chown root:root "${TRIM_PKGETC}"
+    [ ! -L "${TRIM_PKGETC}/launch.log" ] || fail '启动日志不得为符号链接。'
+    # Existing services are returned above; metadata migration never runs live.
+    for file in "${TRIM_APPDEST}/server/prepare-data" "${TRIM_APPDEST}/server/fn-wireguard-maintenance"; do
+      [ -f "$file" ] && [ ! -L "$file" ] || fail '数据维护程序缺失或为不安全链接，请重新安装。'
+      [ "$(stat -c '%u:%a' "$file")" = '0:755' ] || fail '数据维护程序必须归 root 所有且权限为 0755。'
+    done
+    if ! /bin/bash "${TRIM_APPDEST}/server/prepare-data" 2> "${TRIM_PKGETC}/launch.log"; then
+      printf '应用数据权限迁移失败：\n' > "${TRIM_TEMP_LOGFILE}"
+      cat "${TRIM_PKGETC}/launch.log" >> "${TRIM_TEMP_LOGFILE}"
+      exit 1
+    fi
+    if [ -L "$GATEWAY_SOCKET" ]; then
+      [ "$(readlink "$GATEWAY_SOCKET")" = "$SOCKET_FILE" ] || fail '网关 Socket 链接不属于应用，拒绝修改。'
+    elif [ -e "$GATEWAY_SOCKET" ]; then
+      fail '网关 Socket 路径已被占用，拒绝覆盖。'
+    else
+      ln -s "$SOCKET_FILE" "$GATEWAY_SOCKET"
+    fi
+    # Runtime forwarding is shared by Docker and other NAS apps. Enable only;
+    # never disable it on stop, and never change host firewall default policies.
+    command -v sysctl >/dev/null 2>&1 || fail '系统缺少 sysctl，无法准备局域网转发。'
+    if [ "$(sysctl -n net.ipv4.ip_forward)" != 1 ]; then
+      sysctl -w net.ipv4.ip_forward=1 >> "${TRIM_PKGETC}/launch.log" 2>&1 || fail '无法启用 IPv4 转发，请检查 launch.log。'
+    fi
+    setpriv --reuid "${TRIM_USERNAME}" --regid "${TRIM_GROUPNAME}" --clear-groups \
+      --inh-caps=-all,+net_admin --ambient-caps=-all,+net_admin \
+      --bounding-set=-all,+net_admin --no-new-privs \
+      /bin/bash "${TRIM_APPDEST}/server/run-service" 9>&- 2>> "${TRIM_PKGETC}/launch.log" &
+    LAUNCH_PID="$!"
+    printf '%s\n' "$LAUNCH_PID" > "$PID_FILE"
+    count=0
+    while [ "$count" -lt 10 ]; do
+      PID="$(cat "$PID_FILE")"
+      kill -0 "$PID" 2>/dev/null || start_failed '应用启动失败，请检查 app.log 或配置目录中的 launch.log（最小权限启动诊断）。'
+      if [ -S "$SOCKET_FILE" ] && running; then
+        exit 0
+      fi
+      sleep 1
+      count=$((count + 1))
+    done
+    start_failed '应用启动超时，请检查 app.log。'
+    ;;
+  stop)
+    if running; then
+      kill -TERM "$PID"
+      count=0
+      while running && [ "$count" -lt 15 ]; do
+        sleep 1
+        count=$((count + 1))
+      done
+      if running; then fail '应用未能正常停止，请检查 app.log。'; fi
+    fi
+    rm -f "$PID_FILE"
+    # Listener cleanup belongs to the unprivileged service.
+    exit 0
+    ;;
+  status)
+    if running; then exit 0; fi
+    exit 3
+    ;;
+  *) fail '未知的应用运行命令。' ;;
+esac

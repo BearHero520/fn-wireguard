@@ -1,0 +1,48 @@
+#!/bin/bash
+set -eu
+umask 077
+# Pre-copy hooks must work with old payloads and partially replaced cmd.
+PID_FILE="${TRIM_PKGETC}/app.pid"
+APP_BIN="${TRIM_APPDEST}/server/fn-wireguard"
+APP_BIN_REAL="$(readlink -f "$APP_BIN" 2>/dev/null || printf '%s' "$APP_BIN")"
+
+running() {
+  [ -f "$PID_FILE" ] || return 1
+  PID="$(cat "$PID_FILE")"
+  case "$PID" in ''|*[!0-9]*) return 1 ;; esac
+  [ -L "/proc/$PID/exe" ] || return 1
+  PROCESS_EXE="$(readlink "/proc/$PID/exe" 2>/dev/null)" || return 1
+  [ "${PROCESS_EXE% (deleted)}" = "$APP_BIN_REAL" ] || return 1
+  kill -0 "$PID" 2>/dev/null
+}
+
+fail() { printf '%s\n' "$1" > "${TRIM_TEMP_LOGFILE}"; exit 1; }
+lock_fail() { printf '%s\n' "$1" > "${TRIM_TEMP_LOGFILE}"; exit 1; }
+acquire_lifecycle_lock() {
+  [ "$(id -u)" = 0 ] || lock_fail '生命周期维护需要 root 权限。'
+  command -v flock >/dev/null 2>&1 || lock_fail '系统缺少 flock，无法串行执行应用生命周期操作。'
+  mkdir -p "${TRIM_PKGETC}"
+  chown root:root "${TRIM_PKGETC}"
+  chmod 700 "${TRIM_PKGETC}"
+  LOCK_FILE="${TRIM_PKGETC}/lifecycle.lock"
+  if [ -e "$LOCK_FILE" ] || [ -L "$LOCK_FILE" ]; then
+    [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ] || lock_fail '生命周期锁必须为普通文件，不能为符号链接。'
+    [ "$(stat -c '%h:%u' "$LOCK_FILE")" = '1:0' ] || lock_fail '生命周期锁必须归 root 所有且只有一个硬链接。'
+  fi
+  exec 9> "$LOCK_FILE"
+  chmod 600 "$LOCK_FILE"
+  flock -n 9 || lock_fail '另一项应用启动、停止或升级操作正在进行，请稍后重试。'
+}
+acquire_lifecycle_lock
+if running; then
+  kill -TERM "$PID"
+  count=0
+  while running && [ "$count" -lt 15 ]; do
+    sleep 1
+    count=$((count + 1))
+  done
+  if running; then fail '应用未能正常停止，请检查 app.log。'; fi
+fi
+rm -f "$PID_FILE"
+# Listener cleanup belongs to the unprivileged service. Persisted data stays intact.
+exit 0

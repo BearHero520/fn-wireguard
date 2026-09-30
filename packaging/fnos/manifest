@@ -1,0 +1,14 @@
+appname=fn-wireguard
+version=0.1.8
+display_name=WireGuard 管理
+desc=为飞牛 NAS 管理 WireGuard 服务和设备连接。
+source=thirdparty
+platform=x86
+maintainer=BearHero520
+distributor=BearHero520
+os_min_version=1.1.3100
+desktop_uidir=ui
+desktop_applaunchname=fn-wireguard.main
+ctl_stop=true
+checkport=false
+disable_authorization_path=true
